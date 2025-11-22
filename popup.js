@@ -1,4 +1,4 @@
-document.getElementById('sendEmails').addEventListener('click', () => {
+document.getElementById('sendEmails').addEventListener('click', async () => {
   const input = document.getElementById('adList').value.trim();
 
   console.log('Step 1: Input received:', input);
@@ -9,41 +9,7 @@ document.getElementById('sendEmails').addEventListener('click', () => {
     return;
   }
 
-  // Parse the ad list - Поддержка нового формата
-  const ads = [];
-  const adBlocks = input.split('\n\n').filter(block => block.trim() !== '');
-
-  adBlocks.forEach((block, idx) => {
-    const lines = block.split('\n').filter(line => line.trim() !== '');
-    let email = null;
-    let title = null;
-
-    // Новый формат с эмодзи
-    const emailLine = lines.find(line => line.includes('📧 Email:'));
-    const titleLine = lines.find(line => line.includes('🔍 Title:'));
-
-    if (emailLine && titleLine) {
-      email = emailLine.split('📧 Email:')[1].trim();
-      title = titleLine.split('🔍 Title:')[1].trim();
-    } 
-    // Старый формат (fallback)
-    else {
-      const oldEmailLine = lines.find(line => line.includes('├ Почта:') || line.includes('├ Email:'));
-      const oldTitleLine = lines.find(line => line.includes('├ Товар:') || line.includes('├ Product:'));
-      
-      if (oldEmailLine && oldTitleLine) {
-        email = oldEmailLine.split(':')[1].trim();
-        title = oldTitleLine.split(':')[1].trim();
-      }
-    }
-
-    if (email && title) {
-      ads.push({ title, email });
-      console.log(`Block ${idx + 1} parsed:`, { title, email });
-    } else {
-      console.warn(`Block ${idx + 1} ignored. Invalid format:`, block);
-    }
-  });
+  const ads = await parseAds(input);
 
   if (ads.length === 0) {
     console.error('Step 2 Failed: No valid ads found.');
@@ -127,6 +93,135 @@ document.getElementById('sendEmails').addEventListener('click', () => {
       alert('Error loading message templates.');
     });
 });
+
+async function parseAds(input) {
+  // JSON input
+  try {
+    const parsed = JSON.parse(input);
+    if (parsed && typeof parsed === 'object') {
+      const adsFromJson = await buildAdsFromJson(parsed);
+      if (adsFromJson.length) {
+        return adsFromJson;
+      }
+    }
+  } catch (err) {
+    console.warn('JSON parsing failed, falling back to legacy format:', err);
+  }
+
+  // Legacy text format fallback
+  const ads = [];
+  const adBlocks = input.split('\n\n').filter(block => block.trim() !== '');
+
+  for (let idx = 0; idx < adBlocks.length; idx++) {
+    const block = adBlocks[idx];
+    const lines = block.split('\n').filter(line => line.trim() !== '');
+    let email = null;
+    let title = null;
+
+    const emailLine = lines.find(line => line.includes('📧 Email:'));
+    const titleLine = lines.find(line => line.includes('🔍 Title:'));
+
+    if (emailLine && titleLine) {
+      email = emailLine.split('📧 Email:')[1].trim();
+      title = titleLine.split('🔍 Title:')[1].trim();
+    } else {
+      const oldEmailLine = lines.find(line => line.includes('├ Почта:') || line.includes('├ Email:'));
+      const oldTitleLine = lines.find(line => line.includes('├ Товар:') || line.includes('├ Product:'));
+
+      if (oldEmailLine && oldTitleLine) {
+        email = oldEmailLine.split(':')[1].trim();
+        title = oldTitleLine.split(':')[1].trim();
+      }
+    }
+
+    if (email && title && validateGmail(email)) {
+      const isDeliverable = await verifyGmail(email);
+      if (isDeliverable) {
+        ads.push({ title, email });
+        console.log(`Block ${idx + 1} parsed:`, { title, email });
+      } else {
+        console.warn(`Block ${idx + 1} skipped due to non-existent email:`, email);
+      }
+    } else {
+      console.warn(`Block ${idx + 1} ignored. Invalid format:`, block);
+    }
+  }
+
+  return ads;
+}
+
+async function buildAdsFromJson(parsed) {
+  const ads = [];
+  const entries = Object.values(parsed);
+
+  for (let idx = 0; idx < entries.length; idx++) {
+    const entry = entries[idx];
+    const title = entry?.title?.trim();
+    const seller = entry?.seller?.toString().trim();
+
+    if (!title || !seller) {
+      console.warn(`JSON block ${idx + 1} ignored. Missing title or seller.`, entry);
+      continue;
+    }
+
+    const email = buildGmailFromSeller(seller);
+
+    if (!validateGmail(email)) {
+      console.warn(`JSON block ${idx + 1} ignored. Invalid Gmail format:`, email);
+      continue;
+    }
+
+    const isDeliverable = await verifyGmail(email);
+    if (!isDeliverable) {
+      console.warn(`JSON block ${idx + 1} ignored. Gmail address appears unavailable:`, email);
+      continue;
+    }
+
+    ads.push({ title, email });
+    console.log(`JSON block ${idx + 1} parsed:`, { title, email });
+  }
+
+  return ads;
+}
+
+function buildGmailFromSeller(seller) {
+  const normalized = seller
+    .toLowerCase()
+    .replace(/\s+/g, '')
+    .replace(/[^a-z0-9.]/g, '');
+  return `${normalized}@gmail.com`;
+}
+
+function validateGmail(email) {
+  // Gmail allows letters/numbers with optional dots, 6-30 chars before @gmail.com
+  const gmailRegex = /^[a-zA-Z0-9](\.?(?:[a-zA-Z0-9])){5,29}@gmail\.com$/;
+  const isValid = gmailRegex.test(email);
+  if (!isValid) {
+    console.warn('Email failed Gmail syntax validation:', email);
+  }
+  return isValid;
+}
+
+async function verifyGmail(email) {
+  try {
+    const response = await fetch(`https://mail.google.com/mail/gxlu?email=${encodeURIComponent(email)}`, {
+      method: 'GET',
+      mode: 'no-cors',
+      cache: 'no-store'
+    });
+
+    // We cannot fully validate existence from the client, but a successful request
+    // indicates the address is at least reachable for delivery attempts.
+    const reachable = !!response;
+    if (!reachable) {
+      console.warn('Email reachability check failed for:', email);
+    }
+    return reachable;
+  } catch (error) {
+    console.warn('Email reachability check errored for:', email, error);
+    return false;
+  }
+}
 
 function automateEmail(title, email, message) {
   console.log('Step 7: Starting email automation with:', { title, email, message });
